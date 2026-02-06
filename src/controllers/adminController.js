@@ -4,7 +4,11 @@ const pool = new Pool({
     ssl: { rejectUnauthorized: false }
 });
 
-// 1. Cadastrar Novo Condomínio
+// ==========================================
+// 1. GESTÃO DE CONDOMÍNIOS (TENANTS)
+// ==========================================
+
+// Cadastrar Novo Condomínio
 exports.criarCondominio = async (req, res) => {
     const { 
         nome, cnpj, endereco, cidade, estado, tipo_estrutura, 
@@ -33,6 +37,16 @@ exports.criarCondominio = async (req, res) => {
     } catch (error) {
         console.error('Erro ao criar condomínio:', error);
         return res.status(500).json({ error: 'Erro ao cadastrar condomínio.' });
+    }
+};
+
+// Listar Condomínios
+exports.listarCondominios = async (req, res) => {
+    try {
+        const result = await pool.query('SELECT * FROM tenants ORDER BY nome ASC');
+        return res.json(result.rows);
+    } catch (error) {
+        return res.status(500).json({ error: 'Erro ao listar.' });
     }
 };
 
@@ -75,7 +89,11 @@ exports.excluirCondominio = async (req, res) => {
     }
 };
 
-// 2. Cadastrar Blocos/Torres
+// ==========================================
+// 2. GESTÃO DE BLOCOS E UNIDADES
+// ==========================================
+
+// Cadastrar Blocos/Torres
 exports.criarBloco = async (req, res) => {
     const { tenant_id, nome } = req.body;
     try {
@@ -89,14 +107,26 @@ exports.criarBloco = async (req, res) => {
     }
 };
 
-// 3. Cadastrar Unidade (INDIVIDUAL) - ATUALIZADO COM ANDAR
+// Listar Blocos
+exports.listarBlocos = async (req, res) => {
+    const { tenant_id } = req.params;
+    try {
+        const result = await pool.query('SELECT * FROM blocos WHERE tenant_id = $1 ORDER BY nome ASC', [tenant_id]);
+        return res.json(result.rows);
+    } catch (error) {
+        return res.status(500).json({ error: 'Erro ao listar blocos.' });
+    }
+};
+
+// Cadastrar Unidade (INDIVIDUAL)
 exports.criarUnidade = async (req, res) => {
+    // Agora recebe 'andar' também
     const { tenant_id, bloco_id, identificacao, andar, criar_medidores } = req.body;
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
         
-        // Insere com o campo ANDAR
+        // Insere com o campo ANDAR (Se vier vazio, põe 'Térreo')
         const unidadeRes = await client.query(
             'INSERT INTO unidades (tenant_id, bloco_id, identificacao, andar) VALUES ($1, $2, $3, $4) RETURNING id, identificacao',
             [tenant_id, bloco_id, identificacao, andar || 'Térreo']
@@ -121,10 +151,11 @@ exports.criarUnidade = async (req, res) => {
     }
 };
 
-// 11. GERAÇÃO EM LOTE (WIZARD) - NOVO!
+// --- NOVA FUNÇÃO: GERAÇÃO EM LOTE (WIZARD) ---
 exports.gerarUnidadesLote = async (req, res) => {
     const { tenant_id, bloco_id, andar, inicio, fim, criar_medidores } = req.body;
     
+    // Validação básica: Início tem que ser menor que Fim
     if (!inicio || !fim || parseInt(inicio) > parseInt(fim)) {
         return res.status(400).json({ error: 'Intervalo inválido (Início deve ser menor que Fim).' });
     }
@@ -136,25 +167,26 @@ exports.gerarUnidadesLote = async (req, res) => {
         let criados = 0;
         const listaCriada = [];
 
-        // Loop do Início ao Fim (Ex: 101 a 110)
+        // Loop do Início ao Fim (Ex: 101, 102, ... 110)
         for (let i = parseInt(inicio); i <= parseInt(fim); i++) {
             const identificacao = i.toString();
 
-            // Verifica duplicidade
+            // 1. Verifica se já existe para não duplicar (Erro comum)
             const check = await client.query(
                 'SELECT id FROM unidades WHERE bloco_id = $1 AND identificacao = $2',
                 [bloco_id, identificacao]
             );
 
             if (check.rows.length === 0) {
-                // Cria a Unidade com o ANDAR
+                // 2. Cria a Unidade com o ANDAR
+                // Se for Casa, o "andar" pode ser usado como "Rua" ou "Quadra"
                 const unidadeRes = await client.query(
                     'INSERT INTO unidades (tenant_id, bloco_id, identificacao, andar) VALUES ($1, $2, $3, $4) RETURNING id',
                     [tenant_id, bloco_id, identificacao, andar]
                 );
                 const unidadeId = unidadeRes.rows[0].id;
 
-                // Cria os Medidores
+                // 3. Cria os Medidores selecionados
                 if (criar_medidores && criar_medidores.length > 0) {
                     for (const tipo of criar_medidores) {
                         await client.query(
@@ -170,7 +202,7 @@ exports.gerarUnidadesLote = async (req, res) => {
 
         await client.query('COMMIT');
         return res.status(201).json({ 
-            message: `Processo concluído! ${criados} unidades criadas no ${andar}.`, 
+            message: `Sucesso! ${criados} unidades geradas (Grupo/Andar: ${andar}).`, 
             detalhes: listaCriada 
         });
 
@@ -183,28 +215,7 @@ exports.gerarUnidadesLote = async (req, res) => {
     }
 };
 
-// 4. Listar Condomínios
-exports.listarCondominios = async (req, res) => {
-    try {
-        const result = await pool.query('SELECT * FROM tenants ORDER BY nome ASC');
-        return res.json(result.rows);
-    } catch (error) {
-        return res.status(500).json({ error: 'Erro ao listar.' });
-    }
-};
-
-// 5. Listar Blocos
-exports.listarBlocos = async (req, res) => {
-    const { tenant_id } = req.params;
-    try {
-        const result = await pool.query('SELECT * FROM blocos WHERE tenant_id = $1 ORDER BY nome ASC', [tenant_id]);
-        return res.json(result.rows);
-    } catch (error) {
-        return res.status(500).json({ error: 'Erro ao listar blocos.' });
-    }
-};
-
-// 6. Listar Unidades (ATUALIZADO PARA TRAZER O ANDAR)
+// Listar Unidades (Traz o Andar/Grupo também)
 exports.listarUnidades = async (req, res) => {
     const { bloco_id } = req.params;
     try {
@@ -222,7 +233,11 @@ exports.listarUnidades = async (req, res) => {
     }
 };
 
-// 7. Criar Usuário
+// ==========================================
+// 3. GESTÃO DE USUÁRIOS
+// ==========================================
+
+// Criar Usuário
 exports.criarUsuario = async (req, res) => {
     const { tenant_id, nome, cpf, senha, tipo, nivel_acesso } = req.body;
     try {
@@ -241,7 +256,7 @@ exports.criarUsuario = async (req, res) => {
     }
 };
 
-// 8. Listar Usuários
+// Listar Usuários
 exports.listarUsuarios = async (req, res) => {
     try {
         const query = `
@@ -257,7 +272,7 @@ exports.listarUsuarios = async (req, res) => {
     }
 };
 
-// 9. Editar Usuário
+// Editar Usuário
 exports.editarUsuario = async (req, res) => {
     const { id } = req.params;
     const { nome, senha, tipo } = req.body;
@@ -279,7 +294,7 @@ exports.editarUsuario = async (req, res) => {
     }
 };
 
-// 10. Excluir Usuário
+// Excluir Usuário
 exports.excluirUsuario = async (req, res) => {
     const { id } = req.params;
     try {
