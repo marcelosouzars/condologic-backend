@@ -27,7 +27,7 @@ exports.criarCondominio = async (req, res) => {
             nome_sindico, email_sindico, telefone_sindico,
             valor_m3_agua || 0, valor_m3_gas || 0, dia_corte || 1
         ];
-        
+
         const result = await pool.query(query, values);
         return res.status(201).json(result.rows[0]);
     } catch (error) {
@@ -36,7 +36,7 @@ exports.criarCondominio = async (req, res) => {
     }
 };
 
-// --- NOVO: EDITAR CONDOMÍNIO ---
+// Editar Condomínio
 exports.editarCondominio = async (req, res) => {
     const { id } = req.params;
     const { 
@@ -56,7 +56,6 @@ exports.editarCondominio = async (req, res) => {
             nome, endereco, nome_sindico, email_sindico, telefone_sindico,
             valor_m3_agua, valor_m3_gas, dia_corte, id
         ];
-        
         const result = await pool.query(query, values);
         return res.json(result.rows[0]);
     } catch (error) {
@@ -65,11 +64,9 @@ exports.editarCondominio = async (req, res) => {
     }
 };
 
-// --- NOVO: EXCLUIR CONDOMÍNIO ---
+// Excluir Condomínio
 exports.excluirCondominio = async (req, res) => {
     const { id } = req.params;
-    // ATENÇÃO: Isso deveria apagar em cascata (blocos, unidades), 
-    // mas pro MVP vamos supor que só apaga se estiver vazio ou forçar no banco.
     try {
         await pool.query('DELETE FROM tenants WHERE id = $1', [id]);
         return res.json({ message: 'Condomínio excluído.' });
@@ -92,15 +89,17 @@ exports.criarBloco = async (req, res) => {
     }
 };
 
-// 3. Cadastrar Unidade
+// 3. Cadastrar Unidade (INDIVIDUAL) - ATUALIZADO COM ANDAR
 exports.criarUnidade = async (req, res) => {
-    const { tenant_id, bloco_id, identificacao, criar_medidores } = req.body;
+    const { tenant_id, bloco_id, identificacao, andar, criar_medidores } = req.body;
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
+        
+        // Insere com o campo ANDAR
         const unidadeRes = await client.query(
-            'INSERT INTO unidades (tenant_id, bloco_id, identificacao) VALUES ($1, $2, $3) RETURNING id, identificacao',
-            [tenant_id, bloco_id, identificacao]
+            'INSERT INTO unidades (tenant_id, bloco_id, identificacao, andar) VALUES ($1, $2, $3, $4) RETURNING id, identificacao',
+            [tenant_id, bloco_id, identificacao, andar || 'Térreo']
         );
         const unidadeId = unidadeRes.rows[0].id;
 
@@ -117,6 +116,68 @@ exports.criarUnidade = async (req, res) => {
     } catch (error) {
         await client.query('ROLLBACK');
         return res.status(500).json({ error: 'Erro ao criar unidade.' });
+    } finally {
+        client.release();
+    }
+};
+
+// 11. GERAÇÃO EM LOTE (WIZARD) - NOVO!
+exports.gerarUnidadesLote = async (req, res) => {
+    const { tenant_id, bloco_id, andar, inicio, fim, criar_medidores } = req.body;
+    
+    if (!inicio || !fim || parseInt(inicio) > parseInt(fim)) {
+        return res.status(400).json({ error: 'Intervalo inválido (Início deve ser menor que Fim).' });
+    }
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        
+        let criados = 0;
+        const listaCriada = [];
+
+        // Loop do Início ao Fim (Ex: 101 a 110)
+        for (let i = parseInt(inicio); i <= parseInt(fim); i++) {
+            const identificacao = i.toString();
+
+            // Verifica duplicidade
+            const check = await client.query(
+                'SELECT id FROM unidades WHERE bloco_id = $1 AND identificacao = $2',
+                [bloco_id, identificacao]
+            );
+
+            if (check.rows.length === 0) {
+                // Cria a Unidade com o ANDAR
+                const unidadeRes = await client.query(
+                    'INSERT INTO unidades (tenant_id, bloco_id, identificacao, andar) VALUES ($1, $2, $3, $4) RETURNING id',
+                    [tenant_id, bloco_id, identificacao, andar]
+                );
+                const unidadeId = unidadeRes.rows[0].id;
+
+                // Cria os Medidores
+                if (criar_medidores && criar_medidores.length > 0) {
+                    for (const tipo of criar_medidores) {
+                        await client.query(
+                            'INSERT INTO medidores (tenant_id, unidade_id, tipo, leitura_anterior, media_consumo) VALUES ($1, $2, $3, 0, 0)',
+                            [tenant_id, unidadeId, tipo]
+                        );
+                    }
+                }
+                criados++;
+                listaCriada.push(identificacao);
+            }
+        }
+
+        await client.query('COMMIT');
+        return res.status(201).json({ 
+            message: `Processo concluído! ${criados} unidades criadas no ${andar}.`, 
+            detalhes: listaCriada 
+        });
+
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('Erro lote:', error);
+        return res.status(500).json({ error: 'Erro ao gerar unidades em lote.' });
     } finally {
         client.release();
     }
@@ -143,7 +204,7 @@ exports.listarBlocos = async (req, res) => {
     }
 };
 
-// 6. Listar Unidades
+// 6. Listar Unidades (ATUALIZADO PARA TRAZER O ANDAR)
 exports.listarUnidades = async (req, res) => {
     const { bloco_id } = req.params;
     try {
