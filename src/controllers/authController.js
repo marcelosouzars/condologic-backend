@@ -1,5 +1,4 @@
 const { Pool } = require('pg');
-
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false }
@@ -10,8 +9,6 @@ exports.login = async (req, res) => {
     const { cpf, senha } = req.body;
 
     try {
-        // Limpeza básica: remove pontos e traços caso o frontend envie formatado
-        // Ex: '123.456.789-00' vira '12345678900'
         const cpfLimpo = cpf.replace(/\D/g, '');
 
         // 1. Busca o usuário pelo CPF
@@ -28,13 +25,30 @@ exports.login = async (req, res) => {
             return res.status(401).json({ error: 'Senha incorreta' });
         }
 
-        // 4. Busca dados do Condomínio (Tenant)
-        // Se o tenant_id for 0 (Master), criamos um objeto "fictício" para não quebrar o app
-        let tenantNome = "Administração Global";
-        if (user.tenant_id !== 0) {
-            const tenantResult = await pool.query('SELECT * FROM tenants WHERE id = $1', [user.tenant_id]);
-            if (tenantResult.rows.length > 0) {
-                tenantNome = tenantResult.rows[0].nome;
+        // 4. Busca dados dos Condomínios permitidos para este usuário
+        let meusCondominios = [];
+        let nomeTenantPrincipal = "Nenhum";
+        let idTenantPrincipal = 0;
+
+        // Se for MASTER, traz TODOS (ou deixa vazio e o front decide, mas vamos trazer todos para facilitar)
+        // Se for Comum, traz só os vinculados
+        if (user.nivel_acesso === 'master') {
+            const allTenants = await pool.query('SELECT id, nome FROM tenants ORDER BY nome ASC');
+            meusCondominios = allTenants.rows;
+            nomeTenantPrincipal = "Acesso Master Global";
+        } else {
+            const ut = await pool.query(`
+                SELECT t.id, t.nome 
+                FROM tenants t
+                JOIN user_tenants ut ON t.id = ut.tenant_id
+                WHERE ut.user_id = $1
+                ORDER BY t.nome ASC
+            `, [user.id]);
+            meusCondominios = ut.rows;
+            
+            if (meusCondominios.length > 0) {
+                nomeTenantPrincipal = meusCondominios[0].nome;
+                idTenantPrincipal = meusCondominios[0].id;
             }
         }
 
@@ -47,10 +61,13 @@ exports.login = async (req, res) => {
                 cpf: user.cpf,
                 role: user.tipo, // 'admin_geral', 'zelador'
                 nivel: user.nivel_acesso, // 'master', 'operador'
+                // Mantemos a estrutura antiga para compatibilidade simples
                 tenant: {
-                    id: user.tenant_id,
-                    nome: tenantNome
-                }
+                    id: idTenantPrincipal,
+                    nome: nomeTenantPrincipal
+                },
+                // Nova estrutura Multi-Tenant
+                tenants: meusCondominios 
             }
         });
 
