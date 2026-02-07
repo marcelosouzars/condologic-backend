@@ -1,4 +1,3 @@
-// src/controllers/leituraController.js
 const { Pool } = require('pg');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
@@ -11,7 +10,7 @@ const genAI = process.env.GEMINI_API_KEY ? new GoogleGenerativeAI(process.env.GE
 const model = genAI ? genAI.getGenerativeModel({ model: "gemini-1.5-flash" }) : null;
 
 exports.salvarLeitura = async (req, res) => {
-    // RECUPERAMOS O 'valor_lido' QUE O APP MANDOU (Plano B)
+    // SEU CÓDIGO ORIGINAL DA IA MANTIDO INTACTO AQUI
     const { unidade_id, medidor_id, data_leitura, foto_base64, ignorar_digito, valor_lido } = req.body;
     
     // Valor Manual enviado pelo App (pode ser 0 se o usuário não digitou nada)
@@ -119,21 +118,24 @@ exports.salvarLeitura = async (req, res) => {
     }
 };
 
-// --- RESTO DO ARQUIVO (Listar, Editar, Excluir) ---
-// Mantenha as funções abaixo exatamente como estavam no arquivo anterior
-// ... (mantenha imports e a função salvarLeitura que fizemos antes) ...
-
+// --- AQUI ESTÁ A MUDANÇA (JOINS PARA EVITAR TELA CINZA) ---
 exports.listarLeituras = async (req, res) => {
     const { tenant_id, mes, ano, bloco_id, unidade_id, data_inicio, data_fim } = req.query;
     
     if (!tenant_id) return res.status(400).json({ error: 'ID do condomínio obrigatório' });
     
     try {
+        // Query com JOINs para pegar os nomes (evita tela cinza no front)
         let query = `
             SELECT 
-                l.id, l.valor_lido, to_char(l.data_leitura, 'DD/MM/YYYY HH24:MI') as data_formatada,
-                u.identificacao as unidade, b.nome as bloco, m.tipo as tipo_medidor,
-                l.foto_url, l.status_leitura
+                l.id, 
+                l.valor_lido, 
+                to_char(l.data_leitura, 'YYYY-MM-DD HH24:MI:SS') as data_leitura,
+                l.foto_url, 
+                l.status_leitura,
+                m.tipo as tipo,
+                u.identificacao as unidade_nome, 
+                b.nome as bloco_nome
             FROM leituras l
             JOIN medidores m ON l.medidor_id = m.id
             JOIN unidades u ON m.unidade_id = u.id
@@ -141,36 +143,21 @@ exports.listarLeituras = async (req, res) => {
             WHERE u.tenant_id = $1
         `;
         const values = [tenant_id];
-        let contador = 2; // Começa no $2
+        let contador = 2;
 
-        // Filtro por Data (Período) - Prioridade sobre Mês/Ano
+        // Filtro de Datas
         if (data_inicio && data_fim) {
             query += ` AND l.data_leitura BETWEEN $${contador} AND $${contador+1}`;
             values.push(`${data_inicio} 00:00:00`, `${data_fim} 23:59:59`);
             contador += 2;
         } 
-        // Filtro por Mês/Ano (Legado, se não mandar datas exatas)
         else if (mes && ano) {
             query += ` AND EXTRACT(MONTH FROM l.data_leitura) = $${contador} AND EXTRACT(YEAR FROM l.data_leitura) = $${contador+1}`;
             values.push(mes, ano);
             contador += 2;
         }
 
-        // Filtro por Bloco
-        if (bloco_id) {
-            query += ` AND b.id = $${contador}`;
-            values.push(bloco_id);
-            contador++;
-        }
-
-        // Filtro por Unidade
-        if (unidade_id) {
-            query += ` AND u.id = $${contador}`;
-            values.push(unidade_id);
-            contador++;
-        }
-
-        query += ` ORDER BY l.data_leitura DESC LIMIT 200`; // Aumentei limite
+        query += ` ORDER BY l.data_leitura DESC LIMIT 300`;
 
         const result = await pool.query(query, values);
         res.json(result.rows);
@@ -180,40 +167,28 @@ exports.listarLeituras = async (req, res) => {
     }
 };
 
-// --- ALTERADO: Permite editar valor E FOTO ---
 exports.editarLeitura = async (req, res) => {
     const { id } = req.params;
-    const { novo_valor, nova_foto } = req.body; // Aceita foto agora
+    const { novo_valor, nova_foto } = req.body; 
 
     try {
-        // Se mandou foto, atualiza valor e foto
         if (nova_foto) {
-            await pool.query(
-                "UPDATE leituras SET valor_lido = $1, foto_url = $2, status_leitura = 'corrigido_web' WHERE id = $3",
-                [novo_valor, nova_foto, id]
-            );
+            await pool.query("UPDATE leituras SET valor_lido = $1, foto_url = $2, status_leitura = 'corrigido_web' WHERE id = $3", [novo_valor, nova_foto, id]);
         } else {
-            // Só valor
-            await pool.query(
-                "UPDATE leituras SET valor_lido = $1, status_leitura = 'corrigido_web' WHERE id = $2",
-                [novo_valor, id]
-            );
+            await pool.query("UPDATE leituras SET valor_lido = $1, status_leitura = 'corrigido_web' WHERE id = $2", [novo_valor, id]);
         }
-
-        // Busca o medidor para atualizar a leitura anterior
+        
+        // Atualiza medidor também
         const leituraRes = await pool.query('SELECT medidor_id FROM leituras WHERE id = $1', [id]);
         if (leituraRes.rows.length > 0) {
-            const medidorId = leituraRes.rows[0].medidor_id;
-            await pool.query('UPDATE medidores SET leitura_anterior = $1 WHERE id = $2', [novo_valor, medidorId]);
+            await pool.query('UPDATE medidores SET leitura_anterior = $1 WHERE id = $2', [novo_valor, leituraRes.rows[0].medidor_id]);
         }
 
-        return res.json({ message: 'Leitura atualizada com sucesso.' });
+        return res.json({ message: 'Leitura atualizada.' });
     } catch (error) {
-        console.error('Erro editar:', error);
         return res.status(500).json({ error: 'Erro ao corrigir.' });
     }
 };
-// ... (manter excluirLeitura) ...
 
 exports.excluirLeitura = async (req, res) => {
     const { id } = req.params;
