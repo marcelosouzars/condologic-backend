@@ -8,7 +8,6 @@ const pool = new Pool({
 // 1. GESTÃO DE CONDOMÍNIOS (TENANTS)
 // ==========================================
 
-// CADASTRAR CONDOMÍNIO (Agora sem obrigação de síndico imediato)
 exports.criarCondominio = async (req, res) => {
     const { 
         nome, cnpj, endereco, cidade, estado, tipo_estrutura, 
@@ -37,33 +36,45 @@ exports.criarCondominio = async (req, res) => {
     }
 };
 
-// LISTAR CONDOMÍNIOS (Com filtro de permissão)
+// LISTAR CONDOMÍNIOS (Trazendo o ID do síndico vinculado)
 exports.listarCondominios = async (req, res) => {
     const { usuario_id, nivel } = req.query;
 
     try {
-        let query = 'SELECT * FROM tenants ORDER BY nome ASC';
+        let query = '';
         let values = [];
 
-        // Se não for MASTER, traz apenas os vinculados ao usuário
+        // Query esperta: Já busca na tabela de ligação QUEM é o síndico deste prédio
+        // para preenchermos o dropdown na tela de edição
+        const subSelectSindico = `
+            (SELECT ut.user_id 
+             FROM user_tenants ut 
+             JOIN users u ON ut.user_id = u.id 
+             WHERE ut.tenant_id = t.id AND u.tipo = 'sindico' 
+             LIMIT 1) as sindico_id
+        `;
+
         if (nivel !== 'master' && usuario_id) {
             query = `
-                SELECT t.* FROM tenants t
+                SELECT t.*, ${subSelectSindico} 
+                FROM tenants t
                 JOIN user_tenants ut ON t.id = ut.tenant_id
                 WHERE ut.user_id = $1
                 ORDER BY t.nome ASC
             `;
             values = [usuario_id];
+        } else {
+            query = `SELECT t.*, ${subSelectSindico} FROM tenants t ORDER BY t.nome ASC`;
         }
 
         const result = await pool.query(query, values);
         return res.json(result.rows);
     } catch (error) {
+        console.error(error);
         return res.status(500).json({ error: 'Erro ao listar.' });
     }
 };
 
-// EDITAR CONDOMÍNIO
 exports.editarCondominio = async (req, res) => {
     const { id } = req.params;
     const { 
@@ -81,43 +92,37 @@ exports.editarCondominio = async (req, res) => {
         const result = await pool.query(query, values);
         return res.json(result.rows[0]);
     } catch (error) {
-        console.error('Erro editar:', error);
         return res.status(500).json({ error: 'Erro ao editar.' });
     }
 };
 
-// EXCLUIR CONDOMÍNIO
 exports.excluirCondominio = async (req, res) => {
     const { id } = req.params;
     try {
         await pool.query('DELETE FROM tenants WHERE id = $1', [id]);
         return res.json({ message: 'Condomínio excluído.' });
     } catch (error) {
-        return res.status(500).json({ error: 'Erro ao excluir (verifique se há dados vinculados).' });
+        return res.status(500).json({ error: 'Erro ao excluir.' });
     }
 };
 
 // ==========================================
-// 2. GESTÃO DE USUÁRIOS (SÍNDICOS, ZELADORES, ETC)
+// 2. GESTÃO DE USUÁRIOS
 // ==========================================
 
-// CRIAR USUÁRIO COMPLETO
 exports.criarUsuario = async (req, res) => {
-    // Recebe o cadastro completo
+    // Recebe cadastro completo
     const { 
         nome, cpf, rg, email, telefone, senha, tipo, nivel_acesso,
         endereco_logradouro, endereco_numero, endereco_complemento, 
-        endereco_bairro, endereco_cep, endereco_cidade, endereco_estado,
-        tenant_id_inicial // Opcional: Se já quiser vincular na criação
+        endereco_bairro, endereco_cep, endereco_cidade, endereco_estado
     } = req.body;
 
     const client = await pool.connect();
-    
     try {
         await client.query('BEGIN');
         const cpfLimpo = cpf.replace(/\D/g, '');
 
-        // 1. Insere na tabela USERS com todos os detalhes
         const query = `
             INSERT INTO users (
                 nome, cpf, rg, email, telefone, senha_hash, tipo, nivel_acesso,
@@ -135,44 +140,44 @@ exports.criarUsuario = async (req, res) => {
         ];
 
         const result = await client.query(query, values);
-        const newUserId = result.rows[0].id;
-
-        // 2. Se foi passado um condomínio inicial, já faz o vínculo
-        if (tenant_id_inicial) {
-            await client.query(
-                'INSERT INTO user_tenants (user_id, tenant_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-                [newUserId, tenant_id_inicial]
-            );
-        }
-
         await client.query('COMMIT');
         return res.status(201).json(result.rows[0]);
 
     } catch (error) {
         await client.query('ROLLBACK');
         if (error.code === '23505') return res.status(400).json({ error: 'CPF ou Email já cadastrados.' });
-        console.error('Erro criar usuário:', error);
         return res.status(500).json({ error: 'Erro ao cadastrar usuário.' });
     } finally {
         client.release();
     }
 };
 
-// VINCULAR USUÁRIO A UM CONDOMÍNIO (Atribuição)
+// VINCULAR E DESVINCULAR
 exports.vincularUsuarioCondominio = async (req, res) => {
     const { user_id, tenant_id } = req.body;
     try {
+        // Vincula
         await pool.query(
             'INSERT INTO user_tenants (user_id, tenant_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
             [user_id, tenant_id]
         );
-        res.json({ message: 'Vínculo realizado com sucesso.' });
+        // Atualiza os campos de texto no tenant apenas para cache visual (opcional)
+        // Buscamos dados do user
+        const userRes = await pool.query('SELECT nome, email, telefone FROM users WHERE id = $1', [user_id]);
+        if(userRes.rows.length > 0) {
+            const u = userRes.rows[0];
+            await pool.query(
+                'UPDATE tenants SET nome_sindico=$1, email_sindico=$2, telefone_sindico=$3 WHERE id=$4',
+                [u.nome, u.email, u.telefone, tenant_id]
+            );
+        }
+
+        res.json({ message: 'Vínculo realizado.' });
     } catch (error) {
         res.status(500).json({ error: 'Erro ao vincular.' });
     }
 };
 
-// DESVINCULAR USUÁRIO DE UM CONDOMÍNIO
 exports.desvincularUsuarioCondominio = async (req, res) => {
     const { user_id, tenant_id } = req.body;
     try {
@@ -186,10 +191,8 @@ exports.desvincularUsuarioCondominio = async (req, res) => {
     }
 };
 
-// LISTAR USUÁRIOS
 exports.listarUsuarios = async (req, res) => {
     try {
-        // Traz usuários e uma string agregada com os nomes dos condomínios que eles atendem
         const query = `
             SELECT u.id, u.nome, u.cpf, u.email, u.telefone, u.tipo, u.nivel_acesso,
                    STRING_AGG(t.nome, ', ') as condominios_vinculados
@@ -206,14 +209,12 @@ exports.listarUsuarios = async (req, res) => {
     }
 };
 
-// EDITAR USUÁRIO
 exports.editarUsuario = async (req, res) => {
     const { id } = req.params;
-    const { nome, email, telefone, tipo, senha } = req.body; // Adicione outros campos se quiser editar tudo
+    const { nome, email, telefone, tipo, senha } = req.body;
     try {
         let query = '';
         let values = [];
-        
         if (senha && senha.trim() !== '') {
             query = `UPDATE users SET nome=$1, email=$2, telefone=$3, tipo=$4, senha_hash=$5 WHERE id=$6`;
             values = [nome, email, telefone, tipo, senha, id];
@@ -221,7 +222,6 @@ exports.editarUsuario = async (req, res) => {
             query = `UPDATE users SET nome=$1, email=$2, telefone=$3, tipo=$4 WHERE id=$5`;
             values = [nome, email, telefone, tipo, id];
         }
-        
         await pool.query(query, values);
         return res.json({ message: 'Usuário atualizado.' });
     } catch (error) {
@@ -239,127 +239,62 @@ exports.excluirUsuario = async (req, res) => {
     }
 };
 
-
-// ==========================================
-// 3. GESTÃO DE BLOCOS E UNIDADES
-// ==========================================
-// (MANTENHA AS FUNÇÕES ABAIXO IGUAIS AO ARQUIVO ANTERIOR)
-
+// BLOCOS E UNIDADES (Mantém igual)
 exports.criarBloco = async (req, res) => {
     const { tenant_id, nome } = req.body;
     try {
-        const result = await pool.query(
-            'INSERT INTO blocos (tenant_id, nome) VALUES ($1, $2) RETURNING *',
-            [tenant_id, nome]
-        );
+        const result = await pool.query('INSERT INTO blocos (tenant_id, nome) VALUES ($1, $2) RETURNING *', [tenant_id, nome]);
         return res.status(201).json(result.rows[0]);
-    } catch (error) {
-        return res.status(500).json({ error: 'Erro ao criar bloco.' });
-    }
+    } catch (error) { return res.status(500).json({ error: 'Erro bloco' }); }
 };
-
 exports.listarBlocos = async (req, res) => {
     const { tenant_id } = req.params;
     try {
         const result = await pool.query('SELECT * FROM blocos WHERE tenant_id = $1 ORDER BY nome ASC', [tenant_id]);
         return res.json(result.rows);
-    } catch (error) {
-        return res.status(500).json({ error: 'Erro ao listar blocos.' });
-    }
+    } catch (error) { return res.status(500).json({ error: 'Erro listar blocos' }); }
 };
-
 exports.criarUnidade = async (req, res) => {
     const { tenant_id, bloco_id, identificacao, andar, criar_medidores } = req.body;
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
-        const unidadeRes = await client.query(
-            'INSERT INTO unidades (tenant_id, bloco_id, identificacao, andar) VALUES ($1, $2, $3, $4) RETURNING id, identificacao',
-            [tenant_id, bloco_id, identificacao, andar || 'Térreo']
-        );
+        const unidadeRes = await client.query('INSERT INTO unidades (tenant_id, bloco_id, identificacao, andar) VALUES ($1, $2, $3, $4) RETURNING id', [tenant_id, bloco_id, identificacao, andar || 'Térreo']);
         const unidadeId = unidadeRes.rows[0].id;
-
-        if (criar_medidores && criar_medidores.length > 0) {
+        if (criar_medidores) {
             for (const tipo of criar_medidores) {
-                await client.query(
-                    'INSERT INTO medidores (tenant_id, unidade_id, tipo, leitura_anterior, media_consumo) VALUES ($1, $2, $3, 0, 0)',
-                    [tenant_id, unidadeId, tipo]
-                );
+                await client.query('INSERT INTO medidores (tenant_id, unidade_id, tipo, leitura_anterior, media_consumo) VALUES ($1, $2, $3, 0, 0)', [tenant_id, unidadeId, tipo]);
             }
         }
-        await client.query('COMMIT');
-        return res.status(201).json({ message: `Unidade ${identificacao} criada!` });
-    } catch (error) {
-        await client.query('ROLLBACK');
-        return res.status(500).json({ error: 'Erro ao criar unidade.' });
-    } finally {
-        client.release();
-    }
+        await client.query('COMMIT'); return res.status(201).json({ message: 'Unidade criada' });
+    } catch (error) { await client.query('ROLLBACK'); return res.status(500).json({ error: 'Erro unidade' }); } finally { client.release(); }
 };
-
 exports.gerarUnidadesLote = async (req, res) => {
     const { tenant_id, bloco_id, andar, inicio, fim, criar_medidores } = req.body;
-    if (!inicio || !fim || parseInt(inicio) > parseInt(fim)) {
-        return res.status(400).json({ error: 'Intervalo inválido.' });
-    }
-
+    if (!inicio || !fim || parseInt(inicio) > parseInt(fim)) return res.status(400).json({ error: 'Intervalo inválido' });
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
         let criados = 0;
-        const listaCriada = [];
-
         for (let i = parseInt(inicio); i <= parseInt(fim); i++) {
             const identificacao = i.toString();
-            const check = await client.query(
-                'SELECT id FROM unidades WHERE bloco_id = $1 AND identificacao = $2',
-                [bloco_id, identificacao]
-            );
+            const check = await client.query('SELECT id FROM unidades WHERE bloco_id = $1 AND identificacao = $2', [bloco_id, identificacao]);
             if (check.rows.length === 0) {
-                const unidadeRes = await client.query(
-                    'INSERT INTO unidades (tenant_id, bloco_id, identificacao, andar) VALUES ($1, $2, $3, $4) RETURNING id',
-                    [tenant_id, bloco_id, identificacao, andar]
-                );
-                const unidadeId = unidadeRes.rows[0].id;
-
-                if (criar_medidores && criar_medidores.length > 0) {
-                    for (const tipo of criar_medidores) {
-                        await client.query(
-                            'INSERT INTO medidores (tenant_id, unidade_id, tipo, leitura_anterior, media_consumo) VALUES ($1, $2, $3, 0, 0)',
-                            [tenant_id, unidadeId, tipo]
-                        );
-                    }
+                const uRes = await client.query('INSERT INTO unidades (tenant_id, bloco_id, identificacao, andar) VALUES ($1, $2, $3, $4) RETURNING id', [tenant_id, bloco_id, identificacao, andar]);
+                const uId = uRes.rows[0].id;
+                if (criar_medidores) {
+                    for (const t of criar_medidores) await client.query('INSERT INTO medidores (tenant_id, unidade_id, tipo, leitura_anterior, media_consumo) VALUES ($1, $2, $3, 0, 0)', [tenant_id, uId, t]);
                 }
                 criados++;
-                listaCriada.push(identificacao);
             }
         }
-        await client.query('COMMIT');
-        return res.status(201).json({ 
-            message: `Sucesso! ${criados} unidades geradas.`, 
-            detalhes: listaCriada 
-        });
-    } catch (error) {
-        await client.query('ROLLBACK');
-        return res.status(500).json({ error: 'Erro ao gerar unidades em lote.' });
-    } finally {
-        client.release();
-    }
+        await client.query('COMMIT'); return res.status(201).json({ message: `Gerados ${criados}` });
+    } catch (error) { await client.query('ROLLBACK'); return res.status(500).json({ error: 'Erro lote' }); } finally { client.release(); }
 };
-
 exports.listarUnidades = async (req, res) => {
     const { bloco_id } = req.params;
     try {
-        const query = `
-            SELECT u.*, 
-            (SELECT COUNT(*) FROM medidores m WHERE m.unidade_id = u.id) as total_medidores
-            FROM unidades u 
-            WHERE u.bloco_id = $1 
-            ORDER BY u.identificacao ASC
-        `;
-        const result = await pool.query(query, [bloco_id]);
+        const result = await pool.query('SELECT u.*, (SELECT COUNT(*) FROM medidores m WHERE m.unidade_id = u.id) as total_medidores FROM unidades u WHERE u.bloco_id = $1 ORDER BY u.identificacao ASC', [bloco_id]);
         return res.json(result.rows);
-    } catch (error) {
-        return res.status(500).json({ error: 'Erro ao listar unidades.' });
-    }
+    } catch (error) { return res.status(500).json({ error: 'Erro listar unidades' }); }
 };
