@@ -2,34 +2,30 @@ const express = require('express');
 const router = express.Router();
 const adminController = require('../controllers/adminController');
 
-// ==========================================
-// ROTAS DE ADMINISTRAÇÃO (SÍNDICO/SUPORTE)
-// ==========================================
+// --- ROTAS DE CONDOMÍNIO ---
+router.post('/condominio', adminController.criarCondominio);
+router.get('/condominios', adminController.listarCondominios);
+router.put('/condominio/:id', adminController.editarCondominio);
+router.delete('/condominio/:id', adminController.excluirCondominio);
 
-// --- CONDOMÍNIOS (Tenants) ---
-router.post('/condominio', adminController.criarCondominio);       // Criar
-router.get('/condominios', adminController.listarCondominios);     // Listar
-router.put('/condominio/:id', adminController.editarCondominio);   // Editar
-router.delete('/condominio/:id', adminController.excluirCondominio); // Excluir
+// --- ROTAS DE BLOCO ---
+router.post('/bloco', adminController.criarBloco);
+router.get('/blocos/:tenant_id', adminController.listarBlocos);
 
-// --- BLOCOS ---
-router.post('/bloco', adminController.criarBloco);                 // Criar Bloco
-router.get('/blocos/:tenant_id', adminController.listarBlocos);    // Listar Blocos
+// --- ROTAS DE UNIDADE ---
+router.post('/unidade', adminController.criarUnidade);
+router.post('/unidades/lote', adminController.gerarUnidadesLote);
+router.get('/unidades/:bloco_id', adminController.listarUnidades);
 
-// --- UNIDADES (APARTAMENTOS/CASAS) ---
-router.post('/unidade', adminController.criarUnidade);             // Criar 1 Unidade (Individual)
-router.get('/unidades/:bloco_id', adminController.listarUnidades); // Listar Unidades do Bloco
+// --- ROTAS DE USUÁRIO ---
+router.post('/usuario', adminController.criarUsuario);
+router.get('/usuarios', adminController.listarUsuarios);
+router.put('/usuario/:id', adminController.editarUsuario);
+router.delete('/usuario/:id', adminController.excluirUsuario);
 
-// 🔥 ROTA NOVA (GERADOR EM LOTE) 🔥
-// É esta linha aqui que faz o botão "Gerar Lote" funcionar
-router.post('/unidades/lote', adminController.gerarUnidadesLote); 
-
-// --- USUÁRIOS (Porteiros, Zeladores, Etc) ---
-router.post('/usuario', adminController.criarUsuario);             // Criar Usuário
-router.get('/usuarios', adminController.listarUsuarios);           // Listar Usuários
-router.put('/usuario/:id', adminController.editarUsuario);         // Editar Usuário
-router.delete('/usuario/:id', adminController.excluirUsuario);     // Excluir Usuário
-// NOVAS ROTAS DE VÍNCULO DE USUÁRIOS
+// --- NOVAS ROTAS (BUSCA E VÍNCULO) ---
+router.get('/usuarios/buscar', adminController.buscarUsuarios); // Busca por nome/cpf
+router.get('/condominio/:id/equipe', adminController.listarEquipeCondominio); // Vê quem trabalha lá
 router.post('/usuario/vincular', adminController.vincularUsuarioCondominio);
 router.post('/usuario/desvincular', adminController.desvincularUsuarioCondominio);
 
