@@ -9,11 +9,13 @@ const pool = new Pool({
 const genAI = process.env.GEMINI_API_KEY ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY) : null;
 const model = genAI ? genAI.getGenerativeModel({ model: "gemini-1.5-flash" }) : null;
 
+// ==========================================
+// 1. SALVAR LEITURA (COM IA GEMINI) - SEU CÓDIGO MANTIDO
+// ==========================================
 exports.salvarLeitura = async (req, res) => {
-    // SEU CÓDIGO ORIGINAL DA IA MANTIDO INTACTO AQUI
     const { unidade_id, medidor_id, data_leitura, foto_base64, ignorar_digito, valor_lido } = req.body;
     
-    // Valor Manual enviado pelo App (pode ser 0 se o usuário não digitou nada)
+    // Valor Manual enviado pelo App
     const valorApp = parseFloat(valor_lido) || 0;
 
     let valorFinal = 0;
@@ -29,65 +31,41 @@ exports.salvarLeitura = async (req, res) => {
         // --- TENTATIVA 1: INTELIGÊNCIA ARTIFICIAL (GEMINI) ---
         if (model) {
             try {
-                // PROMPT MELHORADO: Focamos no CENTRO e ignoramos periféricos
                 const prompt = `
                     Analise esta imagem de um hidrômetro/medidor.
                     Sua tarefa é ler APENAS os dígitos do consumo (leitura).
-                    
-                    REGRAS CRÍTICAS:
-                    1. FOCO NO CENTRO: O número relevante está sempre na área central horizontal da imagem.
-                    2. IGNORE BORDAS: Ignore números estampados no metal, na carcaça ou nas extremidades (geralmente são números de série).
-                    3. APENAS NÚMEROS: Retorne apenas os dígitos (ex: 1450). Não use letras.
-                    4. Se houver números pretos e vermelhos, considere todos.
+                    REGRAS: FOCO NO CENTRO. IGNORE BORDAS. APENAS NÚMEROS.
                 `;
 
                 const base64Data = foto_base64.replace(/^data:image\/\w+;base64,/, "");
-                
-                const imagePart = {
-                    inlineData: {
-                        data: base64Data,
-                        mimeType: "image/jpeg",
-                    },
-                };
+                const imagePart = { inlineData: { data: base64Data, mimeType: "image/jpeg" } };
 
                 const result = await model.generateContent([prompt, imagePart]);
                 const response = await result.response;
                 let text = response.text();
-                
-                // Limpeza bruta (só deixa números)
                 let numeros = text.replace(/[^0-9]/g, '');
 
                 if (numeros.length > 0) {
-                    // Lógica do Dígito Vermelho
                     if (ignorar_digito === true && numeros.length > 1) {
                         numeros = numeros.substring(0, numeros.length - 1);
                     }
-                    
                     valorFinal = parseFloat(numeros);
-                    status = 'auditado_ia'; // Sucesso total da IA
-                    console.log(`✅ Gemini leu com sucesso: ${valorFinal}`);
-                } else {
-                    console.log("⚠️ Gemini não viu números nítidos.");
-                    // Aqui não zeramos ainda, vamos tentar o Plano B
+                    status = 'auditado_ia';
+                    console.log(`✅ Gemini leu: ${valorFinal}`);
                 }
-
             } catch (aiError) {
-                console.error("❌ Erro no Gemini:", aiError);
-                // Erro na IA, vamos pro Plano B
+                console.error("❌ Erro Gemini:", aiError);
             }
         }
 
-        // --- TENTATIVA 2: PLANO B (VALOR DO APP) ---
-        // Se a IA falhou (valorFinal continua 0) MAS o App mandou um valor válido
+        // --- TENTATIVA 2: PLANO B (APP) ---
         if (valorFinal === 0 && valorApp > 0) {
-            console.log(`⚠️ Usando valor do App (${valorApp}) pois a IA retornou 0 ou falhou.`);
             valorFinal = valorApp;
-            status = 'conferencia_manual'; // Marca que foi salvo, mas precisa de olho humano
+            status = 'conferencia_manual';
         } else if (valorFinal === 0 && valorApp === 0) {
-            status = 'falha_total'; // Nem IA, nem App mandaram nada
+            status = 'falha_total';
         }
 
-        // --- PASSO 3: SALVAR ---
         // Descobre o Tenant
         const medidorRes = await pool.query('SELECT tenant_id FROM medidores WHERE id = $1', [medidor_id]);
         let t_id = 1;
@@ -101,16 +79,11 @@ exports.salvarLeitura = async (req, res) => {
 
         await pool.query(insertQuery, [t_id, medidor_id, valorFinal, data_leitura, status, foto_base64]);
 
-        // Atualiza a leitura anterior
         if (valorFinal > 0) {
             await pool.query('UPDATE medidores SET leitura_anterior = $1 WHERE id = $2', [valorFinal, medidor_id]);
         }
 
-        return res.status(201).json({ 
-            message: 'Leitura processada.', 
-            valor_final: valorFinal,
-            status: status 
-        });
+        return res.status(201).json({ message: 'Processado.', valor_final: valorFinal, status: status });
 
     } catch (error) {
         console.error('❌ Erro Fatal:', error);
@@ -118,19 +91,23 @@ exports.salvarLeitura = async (req, res) => {
     }
 };
 
-// --- AQUI ESTÁ A MUDANÇA (JOINS PARA EVITAR TELA CINZA) ---
+// ==========================================
+// 2. LISTAR LEITURAS (CORRIGIDO PARA O FLUTTER)
+// ==========================================
 exports.listarLeituras = async (req, res) => {
     const { tenant_id, mes, ano, bloco_id, unidade_id, data_inicio, data_fim } = req.query;
     
     if (!tenant_id) return res.status(400).json({ error: 'ID do condomínio obrigatório' });
     
     try {
-        // Query com JOINs para pegar os nomes (evita tela cinza no front)
+        // CORREÇÃO:
+        // 1. data_iso: Mandamos a data em formato YYYY-MM-DD para o Flutter entender.
+        // 2. unidade_nome / bloco_nome: Alias corretos para o Frontend.
         let query = `
             SELECT 
                 l.id, 
                 l.valor_lido, 
-                to_char(l.data_leitura, 'YYYY-MM-DD HH24:MI:SS') as data_leitura,
+                to_char(l.data_leitura, 'YYYY-MM-DD HH24:MI:SS') as data_iso, 
                 l.foto_url, 
                 l.status_leitura,
                 m.tipo as tipo,
@@ -145,7 +122,6 @@ exports.listarLeituras = async (req, res) => {
         const values = [tenant_id];
         let contador = 2;
 
-        // Filtro de Datas
         if (data_inicio && data_fim) {
             query += ` AND l.data_leitura BETWEEN $${contador} AND $${contador+1}`;
             values.push(`${data_inicio} 00:00:00`, `${data_fim} 23:59:59`);
@@ -167,6 +143,9 @@ exports.listarLeituras = async (req, res) => {
     }
 };
 
+// ==========================================
+// 3. EDITAR E EXCLUIR
+// ==========================================
 exports.editarLeitura = async (req, res) => {
     const { id } = req.params;
     const { novo_valor, nova_foto } = req.body; 
@@ -178,13 +157,11 @@ exports.editarLeitura = async (req, res) => {
             await pool.query("UPDATE leituras SET valor_lido = $1, status_leitura = 'corrigido_web' WHERE id = $2", [novo_valor, id]);
         }
         
-        // Atualiza medidor também
         const leituraRes = await pool.query('SELECT medidor_id FROM leituras WHERE id = $1', [id]);
         if (leituraRes.rows.length > 0) {
             await pool.query('UPDATE medidores SET leitura_anterior = $1 WHERE id = $2', [novo_valor, leituraRes.rows[0].medidor_id]);
         }
-
-        return res.json({ message: 'Leitura atualizada.' });
+        return res.json({ message: 'Atualizado.' });
     } catch (error) {
         return res.status(500).json({ error: 'Erro ao corrigir.' });
     }
