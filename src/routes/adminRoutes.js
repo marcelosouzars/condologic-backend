@@ -29,5 +29,8 @@ router.post('/usuario', adminController.criarUsuario);             // Criar Usu�
 router.get('/usuarios', adminController.listarUsuarios);           // Listar Usuários
 router.put('/usuario/:id', adminController.editarUsuario);         // Editar Usuário
 router.delete('/usuario/:id', adminController.excluirUsuario);     // Excluir Usuário
+// NOVAS ROTAS DE VÍNCULO DE USUÁRIOS
+router.post('/usuario/vincular', adminController.vincularUsuarioCondominio);
+router.post('/usuario/desvincular', adminController.desvincularUsuarioCondominio);
 
 module.exports = router;
