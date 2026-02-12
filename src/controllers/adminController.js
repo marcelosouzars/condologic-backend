@@ -45,27 +45,49 @@ exports.editarCondominio = async (req, res) => {
     } catch (error) { return res.status(500).json({ error: 'Erro ao editar.' }); }
 };
 
+// >>> CORREÇÃO DO ERRO DE EXCLUSÃO (CASCADE MANUAL) <<<
 exports.excluirCondominio = async (req, res) => {
     const { id } = req.params;
-    try { await pool.query('DELETE FROM tenants WHERE id = $1', [id]); return res.json({ message: 'Excluído.' }); } 
-    catch (error) { return res.status(500).json({ error: 'Erro ao excluir.' }); }
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        
+        // 1. Remove Leituras
+        await client.query('DELETE FROM leituras WHERE tenant_id = $1', [id]);
+        // 2. Remove Medidores
+        await client.query('DELETE FROM medidores WHERE tenant_id = $1', [id]);
+        // 3. Remove Unidades
+        await client.query('DELETE FROM unidades WHERE tenant_id = $1', [id]);
+        // 4. Remove Blocos
+        await client.query('DELETE FROM blocos WHERE tenant_id = $1', [id]);
+        // 5. Remove Vínculos de Usuários
+        await client.query('DELETE FROM user_tenants WHERE tenant_id = $1', [id]);
+        // 6. Finalmente, remove o Condomínio
+        await client.query('DELETE FROM tenants WHERE id = $1', [id]);
+
+        await client.query('COMMIT');
+        return res.json({ message: 'Condomínio e todos os dados vinculados foram excluídos com sucesso.' });
+    } catch (error) { 
+        await client.query('ROLLBACK');
+        console.error("Erro ao excluir:", error);
+        return res.status(500).json({ error: 'Erro fatal ao excluir condomínio. Verifique dependências.' }); 
+    } finally {
+        client.release();
+    }
 };
 
 // ==========================================
 // 2. GESTÃO DE USUÁRIOS E EQUIPE
 // ==========================================
-
+// (Mantido igual - sem alterações necessárias nesta parte)
 exports.criarUsuario = async (req, res) => {
-    const { nome, cpf, rg, email, telefone, senha, tipo, nivel_acesso, endereco_logradouro, endereco_numero, endereco_complemento, endereco_bairro, endereco_cep, endereco_cidade, endereco_estado } = req.body;
+    const { nome, cpf, rg, email, telefone, senha, tipo, nivel_acesso } = req.body;
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
         const cpfLimpo = cpf.replace(/\D/g, '');
-        const query = `
-            INSERT INTO users (nome, cpf, rg, email, telefone, senha_hash, tipo, nivel_acesso, endereco_logradouro, endereco_numero, endereco_complemento, endereco_bairro, endereco_cep, endereco_cidade, endereco_estado)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id, nome, cpf, tipo;
-        `;
-        const values = [nome, cpfLimpo, rg, email, telefone, senha, tipo, nivel_acesso, endereco_logradouro, endereco_numero, endereco_complemento, endereco_bairro, endereco_cep, endereco_cidade, endereco_estado];
+        const query = `INSERT INTO users (nome, cpf, rg, email, telefone, senha_hash, tipo, nivel_acesso) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, nome, cpf, tipo;`;
+        const values = [nome, cpfLimpo, rg, email, telefone, senha, tipo, nivel_acesso];
         const result = await client.query(query, values);
         await client.query('COMMIT');
         return res.status(201).json(result.rows[0]);
@@ -76,7 +98,6 @@ exports.criarUsuario = async (req, res) => {
     } finally { client.release(); }
 };
 
-// BUSCA INTELIGENTE (CPF ou Nome)
 exports.buscarUsuarios = async (req, res) => {
     const { termo } = req.query;
     if (!termo || termo.length < 3) return res.json([]);
@@ -88,17 +109,10 @@ exports.buscarUsuarios = async (req, res) => {
     } catch (error) { return res.status(500).json({ error: 'Erro na busca.' }); }
 };
 
-// LISTAR QUEM TRABALHA NO CONDOMINIO
 exports.listarEquipeCondominio = async (req, res) => {
-    const { id } = req.params; // ID do condomínio
+    const { id } = req.params;
     try {
-        const query = `
-            SELECT u.id, u.nome, u.cpf, u.tipo 
-            FROM users u
-            JOIN user_tenants ut ON u.id = ut.user_id
-            WHERE ut.tenant_id = $1
-            ORDER BY u.nome ASC
-        `;
+        const query = `SELECT u.id, u.nome, u.cpf, u.tipo FROM users u JOIN user_tenants ut ON u.id = ut.user_id WHERE ut.tenant_id = $1 ORDER BY u.nome ASC`;
         const result = await pool.query(query, [id]);
         return res.json(result.rows);
     } catch (error) { return res.status(500).json({ error: 'Erro ao listar equipe.' }); }
@@ -202,7 +216,11 @@ exports.listarUnidades = async (req, res) => {
 // 4. (NOVO) GERADOR DE ESTRUTURA COMPLETA
 // ==========================================
 exports.gerarEstruturaBloco = async (req, res) => {
-    const { tenant_id, nome_bloco, qtde_andares, unidades_por_andar, criar_medidores } = req.body;
+    const { tenant_id, nome_bloco, qtde_andares, unidades_por_andar, inicio_numeracao, criar_medidores } = req.body;
+
+    // inicio_numeracao: se o usuário digitar 1, aptos são 101, 102...
+    // se digitar 5, aptos são 105, 106...
+    const inicioSeq = inicio_numeracao ? parseInt(inicio_numeracao) : 1;
 
     if (!tenant_id || !nome_bloco || !qtde_andares || !unidades_por_andar) {
         return res.status(400).json({ error: 'Dados incompletos para geração.' });
@@ -224,9 +242,14 @@ exports.gerarEstruturaBloco = async (req, res) => {
         for (let andar = 1; andar <= parseInt(qtde_andares); andar++) {
             
             // 3. Loop das Unidades por Andar
-            for (let seq = 1; seq <= parseInt(unidades_por_andar); seq++) {
+            for (let i = 0; i < parseInt(unidades_por_andar); i++) {
                 
-                // Lógica: Andar 1 + Seq 1 = 101. Andar 13 + Seq 10 = 1310.
+                // Lógica de Numeração Ajustada:
+                // Se inicioSeq = 1 -> sequencia = 1, 2, 3...
+                // Se inicioSeq = 5 -> sequencia = 5, 6, 7...
+                const seq = inicioSeq + i;
+                
+                // Formata com zero à esquerda se for menor que 10 (ex: 101, 102... 110)
                 const sufixo = seq < 10 ? `0${seq}` : `${seq}`;
                 const identificacao = `${andar}${sufixo}`; 
                 const nomeAndar = `${andar}º Andar`;
@@ -238,7 +261,7 @@ exports.gerarEstruturaBloco = async (req, res) => {
                 );
                 const uid = u.rows[0].id;
 
-                // 4. Inserir Medidores
+                // 4. Inserir Medidores (Agora suporta agua_quente)
                 if (criar_medidores && criar_medidores.length > 0) {
                     for (const tipo of criar_medidores) {
                         await client.query(

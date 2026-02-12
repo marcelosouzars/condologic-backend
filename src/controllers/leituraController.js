@@ -7,15 +7,20 @@ const pool = new Pool({
 });
 
 const genAI = process.env.GEMINI_API_KEY ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY) : null;
-const model = genAI ? genAI.getGenerativeModel({ model: "gemini-1.5-flash" }) : null;
+
+// =====================================================================
+// MUDANÇA 1: TROCA DE MODELO (De "flash" para "pro")
+// O "pro" é mais lento (2 a 4s), mas a visão computacional é muito superior.
+// =====================================================================
+const model = genAI ? genAI.getGenerativeModel({ model: "gemini-1.5-pro" }) : null;
 
 // ==========================================
-// 1. SALVAR LEITURA (COM IA GEMINI) - SEU CÓDIGO MANTIDO
+// 1. SALVAR LEITURA (COM IA GEMINI PRO)
 // ==========================================
 exports.salvarLeitura = async (req, res) => {
     const { unidade_id, medidor_id, data_leitura, foto_base64, ignorar_digito, valor_lido } = req.body;
     
-    // Valor Manual enviado pelo App
+    // Valor Manual enviado pelo App (Caso a IA falhe ou usuário digitou)
     const valorApp = parseFloat(valor_lido) || 0;
 
     let valorFinal = 0;
@@ -28,13 +33,25 @@ exports.salvarLeitura = async (req, res) => {
             return res.status(400).json({ error: 'Foto e ID do medidor são obrigatórios.' });
         }
 
-        // --- TENTATIVA 1: INTELIGÊNCIA ARTIFICIAL (GEMINI) ---
+        // --- TENTATIVA 1: INTELIGÊNCIA ARTIFICIAL (GEMINI 1.5 PRO) ---
         if (model) {
             try {
+                // =====================================================================
+                // MUDANÇA 2: PROMPT DE ESPECIALISTA
+                // Instruções mais claras para ignorar sujeira e números de série.
+                // =====================================================================
                 const prompt = `
-                    Analise esta imagem de um hidrômetro/medidor.
-                    Sua tarefa é ler APENAS os dígitos do consumo (leitura).
-                    REGRAS: FOCO NO CENTRO. IGNORE BORDAS. APENAS NÚMEROS.
+                    Você é um leiturista especialista em hidrômetros e medidores de gás.
+                    Sua tarefa: Identificar a leitura numérica atual no mostrador central.
+                    
+                    DIRETRIZES VISUAIS:
+                    1. Foco EXCLUSIVO nos dígitos rolantes (pretos ou vermelhos) dentro do visor.
+                    2. IGNORE números estáticos impressos na carcaça plástica ou vidro (números de série).
+                    3. IGNORE reflexos, sujeira ou gotas d'água. Tente inferir o número se estiver parcialmente sujo.
+                    4. Se o dígito estiver girando entre dois números, escolha o menor (ex: entre 3 e 4, é 3).
+                    
+                    FORMATO DE SAÍDA:
+                    Retorne APENAS os números encontrados. Sem texto, sem explicações. Exemplo: "1456".
                 `;
 
                 const base64Data = foto_base64.replace(/^data:image\/\w+;base64,/, "");
@@ -43,15 +60,19 @@ exports.salvarLeitura = async (req, res) => {
                 const result = await model.generateContent([prompt, imagePart]);
                 const response = await result.response;
                 let text = response.text();
+                
+                // Limpeza extra para garantir que só pegamos números
                 let numeros = text.replace(/[^0-9]/g, '');
 
                 if (numeros.length > 0) {
+                    // Lógica do "Ignorar último dígito" (Geralmente o vermelho/litros)
                     if (ignorar_digito === true && numeros.length > 1) {
                         numeros = numeros.substring(0, numeros.length - 1);
                     }
+                    
                     valorFinal = parseFloat(numeros);
                     status = 'auditado_ia';
-                    console.log(`✅ Gemini leu: ${valorFinal}`);
+                    console.log(`✅ Gemini PRO leu: ${valorFinal} (Texto original: ${text.trim()})`);
                 }
             } catch (aiError) {
                 console.error("❌ Erro Gemini:", aiError);
@@ -59,16 +80,17 @@ exports.salvarLeitura = async (req, res) => {
         }
 
         // --- TENTATIVA 2: PLANO B (APP) ---
+        // Se a IA falhou (retornou 0 ou erro), usamos o que o zelador digitou
         if (valorFinal === 0 && valorApp > 0) {
             valorFinal = valorApp;
-            status = 'conferencia_manual';
+            status = 'conferencia_manual'; // Marca para o síndico ver que a IA falhou
         } else if (valorFinal === 0 && valorApp === 0) {
             status = 'falha_total';
         }
 
-        // Descobre o Tenant
+        // Descobre o Tenant (Para manter o isolamento de dados)
         const medidorRes = await pool.query('SELECT tenant_id FROM medidores WHERE id = $1', [medidor_id]);
-        let t_id = 1;
+        let t_id = 1; // Fallback se der erro
         if (medidorRes.rows.length > 0) t_id = medidorRes.rows[0].tenant_id;
 
         const insertQuery = `
@@ -79,6 +101,7 @@ exports.salvarLeitura = async (req, res) => {
 
         await pool.query(insertQuery, [t_id, medidor_id, valorFinal, data_leitura, status, foto_base64]);
 
+        // Atualiza a leitura anterior do medidor para facilitar a próxima conta
         if (valorFinal > 0) {
             await pool.query('UPDATE medidores SET leitura_anterior = $1 WHERE id = $2', [valorFinal, medidor_id]);
         }
@@ -92,7 +115,7 @@ exports.salvarLeitura = async (req, res) => {
 };
 
 // ==========================================
-// 2. LISTAR LEITURAS (CORRIGIDO PARA O FLUTTER)
+// 2. LISTAR LEITURAS (MANTIDO)
 // ==========================================
 exports.listarLeituras = async (req, res) => {
     const { tenant_id, mes, ano, bloco_id, unidade_id, data_inicio, data_fim } = req.query;
@@ -100,9 +123,6 @@ exports.listarLeituras = async (req, res) => {
     if (!tenant_id) return res.status(400).json({ error: 'ID do condomínio obrigatório' });
     
     try {
-        // CORREÇÃO:
-        // 1. data_iso: Mandamos a data em formato YYYY-MM-DD para o Flutter entender.
-        // 2. unidade_nome / bloco_nome: Alias corretos para o Frontend.
         let query = `
             SELECT 
                 l.id, 
@@ -144,7 +164,7 @@ exports.listarLeituras = async (req, res) => {
 };
 
 // ==========================================
-// 3. EDITAR E EXCLUIR
+// 3. EDITAR E EXCLUIR (MANTIDO)
 // ==========================================
 exports.editarLeitura = async (req, res) => {
     const { id } = req.params;
