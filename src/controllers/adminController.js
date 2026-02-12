@@ -152,7 +152,7 @@ exports.excluirUsuario = async (req, res) => {
 };
 
 // ==========================================
-// 3. BLOCOS E UNIDADES (Sem alterações)
+// 3. BLOCOS E UNIDADES
 // ==========================================
 exports.criarBloco = async (req, res) => {
     const { tenant_id, nome } = req.body;
@@ -196,4 +196,71 @@ exports.gerarUnidadesLote = async (req, res) => {
 exports.listarUnidades = async (req, res) => {
     const { bloco_id } = req.params;
     try { const r = await pool.query('SELECT u.*, (SELECT COUNT(*) FROM medidores m WHERE m.unidade_id=u.id) as total_medidores FROM unidades u WHERE u.bloco_id=$1 ORDER BY u.identificacao ASC', [bloco_id]); return res.json(r.rows); } catch (e) { return res.status(500).json({error:'Erro'}); }
+};
+
+// ==========================================
+// 4. (NOVO) GERADOR DE ESTRUTURA COMPLETA
+// ==========================================
+exports.gerarEstruturaBloco = async (req, res) => {
+    const { tenant_id, nome_bloco, qtde_andares, unidades_por_andar, criar_medidores } = req.body;
+
+    if (!tenant_id || !nome_bloco || !qtde_andares || !unidades_por_andar) {
+        return res.status(400).json({ error: 'Dados incompletos para geração.' });
+    }
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        // 1. Criar o Bloco
+        const blocoRes = await client.query(
+            'INSERT INTO blocos (tenant_id, nome) VALUES ($1, $2) RETURNING id', 
+            [tenant_id, nome_bloco]
+        );
+        const blocoId = blocoRes.rows[0].id;
+        let totalCriados = 0;
+
+        // 2. Loop dos Andares
+        for (let andar = 1; andar <= parseInt(qtde_andares); andar++) {
+            
+            // 3. Loop das Unidades por Andar
+            for (let seq = 1; seq <= parseInt(unidades_por_andar); seq++) {
+                
+                // Lógica: Andar 1 + Seq 1 = 101. Andar 13 + Seq 10 = 1310.
+                const sufixo = seq < 10 ? `0${seq}` : `${seq}`;
+                const identificacao = `${andar}${sufixo}`; 
+                const nomeAndar = `${andar}º Andar`;
+
+                // Inserir Unidade
+                const u = await client.query(
+                    'INSERT INTO unidades (tenant_id, bloco_id, identificacao, andar) VALUES ($1, $2, $3, $4) RETURNING id',
+                    [tenant_id, blocoId, identificacao, nomeAndar]
+                );
+                const uid = u.rows[0].id;
+
+                // 4. Inserir Medidores
+                if (criar_medidores && criar_medidores.length > 0) {
+                    for (const tipo of criar_medidores) {
+                        await client.query(
+                            'INSERT INTO medidores (tenant_id, unidade_id, tipo, leitura_anterior, media_consumo) VALUES ($1, $2, $3, 0, 0)',
+                            [tenant_id, uid, tipo]
+                        );
+                    }
+                }
+                totalCriados++;
+            }
+        }
+
+        await client.query('COMMIT');
+        return res.status(201).json({ 
+            message: `Sucesso! Bloco '${nome_bloco}' criado com ${totalCriados} unidades.` 
+        });
+
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('Erro no Gerador:', error);
+        return res.status(500).json({ error: 'Erro ao gerar estrutura.' });
+    } finally {
+        client.release();
+    }
 };

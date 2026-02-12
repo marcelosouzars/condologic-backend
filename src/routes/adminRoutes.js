@@ -12,6 +12,10 @@ router.delete('/condominio/:id', adminController.excluirCondominio);
 router.post('/bloco', adminController.criarBloco);
 router.get('/blocos/:tenant_id', adminController.listarBlocos);
 
+// >>> NOVA ROTA AQUI <<<
+router.post('/bloco/estrutura-completa', adminController.gerarEstruturaBloco);
+// ----------------------
+
 // --- ROTAS DE UNIDADE ---
 router.post('/unidade', adminController.criarUnidade);
 router.post('/unidades/lote', adminController.gerarUnidadesLote);
@@ -23,9 +27,9 @@ router.get('/usuarios', adminController.listarUsuarios);
 router.put('/usuario/:id', adminController.editarUsuario);
 router.delete('/usuario/:id', adminController.excluirUsuario);
 
-// --- NOVAS ROTAS (BUSCA E VÍNCULO) ---
-router.get('/usuarios/buscar', adminController.buscarUsuarios); // Busca por nome/cpf
-router.get('/condominio/:id/equipe', adminController.listarEquipeCondominio); // Vê quem trabalha lá
+// --- BUSCA E VÍNCULO ---
+router.get('/usuarios/buscar', adminController.buscarUsuarios);
+router.get('/condominio/:id/equipe', adminController.listarEquipeCondominio);
 router.post('/usuario/vincular', adminController.vincularUsuarioCondominio);
 router.post('/usuario/desvincular', adminController.desvincularUsuarioCondominio);
 
