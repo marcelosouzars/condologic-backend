@@ -45,24 +45,18 @@ exports.editarCondominio = async (req, res) => {
     } catch (error) { return res.status(500).json({ error: 'Erro ao editar.' }); }
 };
 
-// >>> CORREÇÃO DO ERRO DE EXCLUSÃO (CASCADE MANUAL) <<<
 exports.excluirCondominio = async (req, res) => {
     const { id } = req.params;
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
         
-        // 1. Remove Leituras
+        // Cascade Manual para limpar tudo
         await client.query('DELETE FROM leituras WHERE tenant_id = $1', [id]);
-        // 2. Remove Medidores
         await client.query('DELETE FROM medidores WHERE tenant_id = $1', [id]);
-        // 3. Remove Unidades
         await client.query('DELETE FROM unidades WHERE tenant_id = $1', [id]);
-        // 4. Remove Blocos
         await client.query('DELETE FROM blocos WHERE tenant_id = $1', [id]);
-        // 5. Remove Vínculos de Usuários
         await client.query('DELETE FROM user_tenants WHERE tenant_id = $1', [id]);
-        // 6. Finalmente, remove o Condomínio
         await client.query('DELETE FROM tenants WHERE id = $1', [id]);
 
         await client.query('COMMIT');
@@ -70,7 +64,7 @@ exports.excluirCondominio = async (req, res) => {
     } catch (error) { 
         await client.query('ROLLBACK');
         console.error("Erro ao excluir:", error);
-        return res.status(500).json({ error: 'Erro fatal ao excluir condomínio. Verifique dependências.' }); 
+        return res.status(500).json({ error: 'Erro fatal ao excluir condomínio.' }); 
     } finally {
         client.release();
     }
@@ -79,20 +73,37 @@ exports.excluirCondominio = async (req, res) => {
 // ==========================================
 // 2. GESTÃO DE USUÁRIOS E EQUIPE
 // ==========================================
-// (Mantido igual - sem alterações necessárias nesta parte)
+
+// >>> CORREÇÃO CRÍTICA: AGORA SALVA O TENANT_ID <<<
 exports.criarUsuario = async (req, res) => {
-    const { nome, cpf, rg, email, telefone, senha, tipo, nivel_acesso } = req.body;
+    // Adicionei tenant_id aqui no destructuring
+    const { nome, cpf, rg, email, telefone, senha, tipo, nivel_acesso, tenant_id } = req.body;
+    
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
         const cpfLimpo = cpf.replace(/\D/g, '');
-        const query = `INSERT INTO users (nome, cpf, rg, email, telefone, senha_hash, tipo, nivel_acesso) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, nome, cpf, tipo;`;
-        const values = [nome, cpfLimpo, rg, email, telefone, senha, tipo, nivel_acesso];
+        
+        // Adicionei tenant_id no INSERT ($9)
+        const query = `
+            INSERT INTO users (nome, cpf, rg, email, telefone, senha_hash, tipo, nivel_acesso, tenant_id) 
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) 
+            RETURNING id, nome, cpf, tipo;
+        `;
+        const values = [nome, cpfLimpo, rg, email, telefone, senha, tipo, nivel_acesso, tenant_id];
+        
         const result = await client.query(query, values);
+        
+        // Opcional: Se quiser garantir o vínculo na tabela user_tenants também (redundância segura)
+        if (tenant_id) {
+            await client.query('INSERT INTO user_tenants (user_id, tenant_id) VALUES ($1, $2)', [result.rows[0].id, tenant_id]);
+        }
+
         await client.query('COMMIT');
         return res.status(201).json(result.rows[0]);
     } catch (error) {
         await client.query('ROLLBACK');
+        console.error(error);
         if (error.code === '23505') return res.status(400).json({ error: 'CPF ou Email já existe.' });
         return res.status(500).json({ error: 'Erro ao cadastrar.' });
     } finally { client.release(); }
@@ -121,7 +132,10 @@ exports.listarEquipeCondominio = async (req, res) => {
 exports.vincularUsuarioCondominio = async (req, res) => {
     const { user_id, tenant_id } = req.body;
     try {
+        // Vincula na tabela de relação
         await pool.query('INSERT INTO user_tenants (user_id, tenant_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [user_id, tenant_id]);
+        // Atualiza também o tenant_id principal do usuário para garantir o login direto
+        await pool.query('UPDATE users SET tenant_id = $2 WHERE id = $1', [user_id, tenant_id]);
         res.json({ message: 'Vinculado.' });
     } catch (error) { res.status(500).json({ error: 'Erro ao vincular.' }); }
 };
@@ -136,27 +150,36 @@ exports.desvincularUsuarioCondominio = async (req, res) => {
 
 exports.listarUsuarios = async (req, res) => {
     try {
-        const query = `SELECT u.id, u.nome, u.cpf, u.tipo, u.nivel_acesso, STRING_AGG(t.nome, ', ') as condominios_vinculados FROM users u LEFT JOIN user_tenants ut ON u.id = ut.user_id LEFT JOIN tenants t ON ut.tenant_id = t.id GROUP BY u.id ORDER BY u.nome ASC;`;
+        const query = `SELECT u.id, u.nome, u.cpf, u.tipo, u.tenant_id, u.nivel_acesso, STRING_AGG(t.nome, ', ') as condominios_vinculados FROM users u LEFT JOIN user_tenants ut ON u.id = ut.user_id LEFT JOIN tenants t ON ut.tenant_id = t.id GROUP BY u.id ORDER BY u.nome ASC;`;
         const result = await pool.query(query);
         return res.json(result.rows);
     } catch (error) { return res.status(500).json({ error: 'Erro lista.' }); }
 };
 
+// >>> CORREÇÃO CRÍTICA: AGORA EDITA O TENANT_ID <<<
 exports.editarUsuario = async (req, res) => {
     const { id } = req.params;
-    const { nome, email, telefone, tipo, senha } = req.body;
+    // Recebendo tenant_id
+    const { nome, email, telefone, tipo, senha, tenant_id } = req.body; 
     try {
         let query = '', values = [];
+        
+        // Se tiver senha
         if (senha && senha.trim() !== '') {
-            query = `UPDATE users SET nome=$1, email=$2, telefone=$3, tipo=$4, senha_hash=$5 WHERE id=$6`;
-            values = [nome, email, telefone, tipo, senha, id];
+            query = `UPDATE users SET nome=$1, email=$2, telefone=$3, tipo=$4, senha_hash=$5, tenant_id=$6 WHERE id=$7`;
+            values = [nome, email, telefone, tipo, senha, tenant_id, id];
         } else {
-            query = `UPDATE users SET nome=$1, email=$2, telefone=$3, tipo=$4 WHERE id=$5`;
-            values = [nome, email, telefone, tipo, id];
+            // Se não tiver senha
+            query = `UPDATE users SET nome=$1, email=$2, telefone=$3, tipo=$4, tenant_id=$5 WHERE id=$6`;
+            values = [nome, email, telefone, tipo, tenant_id, id];
         }
+        
         await pool.query(query, values);
         return res.json({ message: 'Atualizado.' });
-    } catch (error) { return res.status(500).json({ error: 'Erro update.' }); }
+    } catch (error) { 
+        console.error(error);
+        return res.status(500).json({ error: 'Erro update.' }); 
+    }
 };
 
 exports.excluirUsuario = async (req, res) => {
@@ -218,8 +241,8 @@ exports.listarUnidades = async (req, res) => {
 exports.gerarEstruturaBloco = async (req, res) => {
     const { tenant_id, nome_bloco, qtde_andares, unidades_por_andar, inicio_numeracao, criar_medidores } = req.body;
 
-    // inicio_numeracao: se o usuário digitar 1, aptos são 101, 102...
-    // se digitar 5, aptos são 105, 106...
+    // Se usuário digitou inicio 1 -> 101, 102...
+    // Se digitou 5 -> 105, 106...
     const inicioSeq = inicio_numeracao ? parseInt(inicio_numeracao) : 1;
 
     if (!tenant_id || !nome_bloco || !qtde_andares || !unidades_por_andar) {
@@ -244,12 +267,9 @@ exports.gerarEstruturaBloco = async (req, res) => {
             // 3. Loop das Unidades por Andar
             for (let i = 0; i < parseInt(unidades_por_andar); i++) {
                 
-                // Lógica de Numeração Ajustada:
-                // Se inicioSeq = 1 -> sequencia = 1, 2, 3...
-                // Se inicioSeq = 5 -> sequencia = 5, 6, 7...
                 const seq = inicioSeq + i;
                 
-                // Formata com zero à esquerda se for menor que 10 (ex: 101, 102... 110)
+                // Formata 1 -> 01, 10 -> 10. Resultado: 101, 110.
                 const sufixo = seq < 10 ? `0${seq}` : `${seq}`;
                 const identificacao = `${andar}${sufixo}`; 
                 const nomeAndar = `${andar}º Andar`;
@@ -261,7 +281,7 @@ exports.gerarEstruturaBloco = async (req, res) => {
                 );
                 const uid = u.rows[0].id;
 
-                // 4. Inserir Medidores (Agora suporta agua_quente)
+                // 4. Inserir Medidores (Aceita 'agua_fria', 'agua_quente', 'gas' vindo do front)
                 if (criar_medidores && criar_medidores.length > 0) {
                     for (const tipo of criar_medidores) {
                         await client.query(
