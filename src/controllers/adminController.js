@@ -156,29 +156,44 @@ exports.listarUsuarios = async (req, res) => {
     } catch (error) { return res.status(500).json({ error: 'Erro lista.' }); }
 };
 
-// >>> CORREÇÃO CRÍTICA: AGORA EDITA O TENANT_ID <<<
+// >>> CORREÇÃO CRÍTICA: AGORA SALVA NO user_tenants QUANDO EDITA <<<
 exports.editarUsuario = async (req, res) => {
     const { id } = req.params;
-    // Recebendo tenant_id
     const { nome, email, telefone, tipo, senha, tenant_id } = req.body; 
+    
+    // Usamos client para transação (BEGIN/COMMIT) pois vamos mexer em 2 tabelas
+    const client = await pool.connect();
     try {
+        await client.query('BEGIN');
+        
         let query = '', values = [];
         
-        // Se tiver senha
+        // 1. Atualiza dados do Usuário (users)
         if (senha && senha.trim() !== '') {
             query = `UPDATE users SET nome=$1, email=$2, telefone=$3, tipo=$4, senha_hash=$5, tenant_id=$6 WHERE id=$7`;
             values = [nome, email, telefone, tipo, senha, tenant_id, id];
         } else {
-            // Se não tiver senha
             query = `UPDATE users SET nome=$1, email=$2, telefone=$3, tipo=$4, tenant_id=$5 WHERE id=$6`;
             values = [nome, email, telefone, tipo, tenant_id, id];
         }
-        
-        await pool.query(query, values);
-        return res.json({ message: 'Atualizado.' });
+        await client.query(query, values);
+
+        // 2. CORREÇÃO: Garante o vínculo na tabela de permissões (user_tenants)
+        if (tenant_id) {
+            await client.query(
+                'INSERT INTO user_tenants (user_id, tenant_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', 
+                [id, tenant_id]
+            );
+        }
+
+        await client.query('COMMIT');
+        return res.json({ message: 'Atualizado e Vinculado.' });
     } catch (error) { 
+        await client.query('ROLLBACK');
         console.error(error);
         return res.status(500).json({ error: 'Erro update.' }); 
+    } finally {
+        client.release();
     }
 };
 
